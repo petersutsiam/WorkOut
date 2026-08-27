@@ -1,0 +1,11 @@
+import { Activity, CalendarDays, Flame, Trophy } from "lucide-react";
+import { ForgeShell, Panel, SectionLabel } from "@/components/forge-shell";
+import { getCurrentUser, getSessionCount } from "@/lib/supabase/forge-data";
+
+export const instant = false;
+
+const weeks = ["W1", "W2", "W3", "W4", "W5", "W6", "W7", "W8"];
+
+export default async function ProgressPage() { const { userId } = await getCurrentUser(); const sessionCount = await getSessionCount(userId); return <ForgeShell title="Progress" eyebrow="YOUR TRAINING DATA" active="Progress"><div><SectionLabel>PROGRESS OVERVIEW</SectionLabel><h2 className="mt-1 text-2xl font-bold">Small work. Big capacity.</h2></div><div className="mt-6 grid grid-cols-2 gap-3 lg:grid-cols-4"><Metric icon={<Flame />} value="12" label="day streak" /><Metric icon={<Activity />} value="68.4" label="miles total" /><Metric icon={<Trophy />} value="18" label="skills earned" /><Metric icon={<CalendarDays />} value={String(sessionCount)} label="sessions" /></div><Panel className="mt-4"><SectionLabel>WEEKLY CONSISTENCY</SectionLabel><div className="mt-6 flex h-48 items-end gap-2 sm:gap-4">{weeks.map((week, index) => <div key={week} className="flex h-full flex-1 flex-col items-center justify-end gap-2"><div className="w-full rounded-t bg-[#d9ff52]" style={{ height: `${35 + [15, 42, 55, 48, 70, 60, 78, 82][index]}%` }} /><span className="text-[9px] text-zinc-600">{week}</span></div>)}</div></Panel><div className="mt-4 grid gap-4 lg:grid-cols-2"><Panel><SectionLabel>PERSONAL BEST</SectionLabel><h3 className="mt-2 text-lg font-bold">Strict pull-up</h3><p className="mt-1 text-xs text-zinc-500">12 clean reps · set on Aug 21</p></Panel><Panel><SectionLabel>CURRENT PHASE</SectionLabel><h3 className="mt-2 text-lg font-bold">Foundation -&gt; Athletic</h3><p className="mt-1 text-xs text-zinc-500">Week 5 of 12 · 42% complete</p></Panel></div></ForgeShell>; }
+
+function Metric({ icon, value, label }: { icon: React.ReactNode; value: string; label: string }) { return <Panel><div className="text-[#d9ff52]">{icon}</div><strong className="mt-3 block text-2xl">{value}</strong><span className="text-xs text-zinc-500">{label}</span></Panel>; }
