@@ -1,6 +1,11 @@
 import { createClient } from "@/lib/supabase/server";
 import { getLocalDateString } from "@/lib/forge/date";
-import type { SkillProgress } from "@/lib/forge/types";
+import type {
+  ForgeExercise,
+  SkillProgress,
+  SkillChain,
+  SkillNode,
+} from "@/lib/forge/types";
 
 export type ForgeClient = Awaited<ReturnType<typeof createClient>>;
 
@@ -225,6 +230,447 @@ export async function getSkillProgress(
         next_exercise: nextExercise,
       } as SkillProgress;
     });
+}
+
+export async function getSkillTree(
+  supabase: ForgeClient,
+  userId: string | null,
+): Promise<SkillChain[]> {
+  if (!userId) {
+    return [];
+  }
+
+  /*
+   * ==========================================================
+   * 1. LOAD ALL PROGRESSION RELATIONSHIPS
+   *
+   * The progression table is the source of truth for the
+   * skill tree.
+   * ==========================================================
+   */
+
+  const {
+    data: progressions,
+    error: progressionError,
+  } = await supabase
+    .from("exercise_progressions")
+    .select(`
+      current_exercise_id,
+      next_exercise_id,
+      progression_order,
+      required_sets,
+      required_reps,
+      required_hold_seconds,
+      required_distance,
+      required_duration_minutes,
+      required_sessions,
+      final_gate_required,
+      final_gate_type,
+      final_gate_value,
+      final_gate_reps,
+      final_gate_hold_seconds,
+      final_gate_description
+    `)
+    .order("progression_order", {
+      ascending: true,
+    });
+
+  if (progressionError) {
+    console.error(
+      "getSkillTree progressions:",
+      progressionError,
+    );
+
+    return [];
+  }
+
+  if (!progressions || progressions.length === 0) {
+    return [];
+  }
+
+  /*
+   * ==========================================================
+   * 2. COLLECT EVERY EXERCISE IN THE TREE
+   * ==========================================================
+   */
+
+  const exerciseIds = [
+    ...new Set(
+      progressions.flatMap((progression) => [
+        progression.current_exercise_id,
+        progression.next_exercise_id,
+      ]),
+    ),
+  ];
+
+  /*
+   * ==========================================================
+   * 3. LOAD EXERCISE INFORMATION
+   * ==========================================================
+   */
+
+  const {
+    data: exercises,
+    error: exerciseError,
+  } = await supabase
+    .from("exercises")
+    .select(`
+      id,
+      name,
+      category,
+      subcategory,
+      difficulty,
+      description,
+      instructions,
+      form_cues,
+      is_foundation_test,
+      foundation_test_name
+    `)
+    .in("id", exerciseIds);
+
+  if (exerciseError) {
+    console.error(
+      "getSkillTree exercises:",
+      exerciseError,
+    );
+
+    return [];
+  }
+
+  /*
+   * ==========================================================
+   * 4. LOAD USER PROGRESS
+   *
+   * Important:
+   *
+   * We DO NOT filter unlocked = true here.
+   *
+   * Locked exercises need to exist in the tree even if the
+   * user has never trained them.
+   * ==========================================================
+   */
+
+  const {
+    data: userProgress,
+    error: userProgressError,
+  } = await supabase
+    .from("exercise_progress")
+    .select(`
+      exercise_id,
+      mastery_percent,
+      best_reps,
+      best_sets,
+      best_hold_seconds,
+      best_distance,
+      best_duration_minutes,
+      training_sessions_completed,
+      training_requirement_met,
+      final_gate_completed,
+      unlocked,
+      last_performed_at
+    `)
+    .eq("user_id", userId)
+    .in("exercise_id", exerciseIds);
+
+  if (userProgressError) {
+    console.error(
+      "getSkillTree user progress:",
+      userProgressError,
+    );
+
+    return [];
+  }
+
+  /*
+   * ==========================================================
+   * 5. CREATE LOOKUP MAPS
+   * ==========================================================
+   */
+
+  const exerciseMap =
+    new Map<string, ForgeExercise>();
+
+  for (const exercise of exercises ?? []) {
+    exerciseMap.set(
+      exercise.id,
+      exercise as ForgeExercise,
+    );
+  }
+
+  const progressionMap =
+    new Map<string, SkillProgress>();
+
+  for (const progression of progressions) {
+    progressionMap.set(
+      progression.current_exercise_id,
+      progression as SkillProgress,
+    );
+  }
+
+  const progressMap =
+    new Map<
+      string,
+      NonNullable<typeof userProgress>[number]
+    >();
+
+  for (const progress of userProgress ?? []) {
+    progressMap.set(
+      progress.exercise_id,
+      progress,
+    );
+  }
+
+  /*
+   * ==========================================================
+   * 6. CREATE ALL SKILL NODES
+   * ==========================================================
+   */
+
+  const nodeMap =
+    new Map<string, SkillNode>();
+
+  for (const exerciseId of exerciseIds) {
+    const exercise =
+      exerciseMap.get(exerciseId);
+
+    if (!exercise) {
+      continue;
+    }
+
+    const progress =
+      progressMap.get(exerciseId);
+
+    const progression =
+      progressionMap.get(exerciseId) ?? null;
+
+    const nextExercise = progression
+      ? exerciseMap.get(
+          progression.next_exercise_id,
+        ) ?? null
+      : null;
+
+    const unlocked =
+      progress?.unlocked === true;
+
+    const finalGateCompleted =
+      progress?.final_gate_completed === true;
+
+    /*
+     * Determine what the user sees.
+     */
+
+    let status: SkillNodeStatus;
+
+    if (finalGateCompleted) {
+      status = "complete";
+    } else if (unlocked) {
+      status = "current";
+    } else {
+      status = "locked";
+    }
+
+    nodeMap.set(exerciseId, {
+      exercise,
+
+      status,
+
+      mastery_percent: Number(
+        progress?.mastery_percent ?? 0,
+      ),
+
+      best_reps:
+        progress?.best_reps ?? null,
+
+      best_sets:
+        progress?.best_sets ?? null,
+
+      best_hold_seconds:
+        progress?.best_hold_seconds ?? null,
+
+      best_distance:
+        progress?.best_distance ?? null,
+
+      best_duration_minutes:
+        progress?.best_duration_minutes ?? null,
+
+      training_sessions_completed:
+        progress?.training_sessions_completed ?? 0,
+
+      training_requirement_met:
+        progress?.training_requirement_met === true,
+
+      final_gate_completed:
+        finalGateCompleted,
+
+      unlocked,
+
+      progression,
+
+      next_exercise: nextExercise,
+    });
+  }
+
+  /*
+   * ==========================================================
+   * 7. FIND ROOT NODES
+   *
+   * Example:
+   *
+   * Wall Push-up
+   *      ↓
+   * Incline Push-up
+   *      ↓
+   * Knee Push-up
+   *
+   * Wall Push-up is the root.
+   * ==========================================================
+   */
+
+  const nextExerciseIds =
+    new Set(
+      progressions.map(
+        (progression) =>
+          progression.next_exercise_id,
+      ),
+    );
+
+  const rootIds = [
+    ...new Set(
+      progressions
+        .map(
+          (progression) =>
+            progression.current_exercise_id,
+        )
+        .filter(
+          (id) =>
+            !nextExerciseIds.has(id),
+        ),
+    ),
+  ];
+
+  /*
+   * ==========================================================
+   * 8. WALK EACH PROGRESSION CHAIN
+   * ==========================================================
+   */
+
+  const chains: SkillChain[] = [];
+
+  for (const rootId of rootIds) {
+    const nodes: SkillNode[] = [];
+
+    const visited =
+      new Set<string>();
+
+    let currentId:
+      string | null = rootId;
+
+    while (
+      currentId &&
+      !visited.has(currentId)
+    ) {
+      visited.add(currentId);
+
+      const node =
+        nodeMap.get(currentId);
+
+      if (!node) {
+        break;
+      }
+
+      nodes.push(node);
+
+      const progression =
+        progressionMap.get(
+          currentId,
+        );
+
+      currentId =
+        progression?.next_exercise_id ??
+        null;
+    }
+
+    if (nodes.length === 0) {
+      continue;
+    }
+
+    chains.push({
+      id: rootId,
+
+      category:
+        nodes[0].exercise.category ||
+        "Movement",
+
+      nodes,
+    });
+  }
+
+  /*
+   * ==========================================================
+   * 9. HANDLE ORPHANED NODES
+   *
+   * This prevents progression data from disappearing if the
+   * database contains a branch or incomplete chain.
+   * ==========================================================
+   */
+
+  const includedIds =
+    new Set(
+      chains.flatMap((chain) =>
+        chain.nodes.map(
+          (node) =>
+            node.exercise.id,
+        ),
+      ),
+    );
+
+  for (const node of nodeMap.values()) {
+    if (includedIds.has(node.exercise.id)) {
+      continue;
+    }
+
+    chains.push({
+      id: node.exercise.id,
+
+      category:
+        node.exercise.category ||
+        "Movement",
+
+      nodes: [node],
+    });
+  }
+
+  /*
+   * ==========================================================
+   * 10. SORT ACTIVE CHAINS FIRST
+   * ==========================================================
+   */
+
+  chains.sort((a, b) => {
+    const aActive =
+      a.nodes.some(
+        (node) =>
+          node.status === "current" ||
+          node.status === "complete",
+      );
+
+    const bActive =
+      b.nodes.some(
+        (node) =>
+          node.status === "current" ||
+          node.status === "complete",
+      );
+
+    if (aActive !== bActive) {
+      return aActive ? -1 : 1;
+    }
+
+    return a.category.localeCompare(
+      b.category,
+    );
+  });
+
+  return chains;
 }
 
 export async function getSessionCount(

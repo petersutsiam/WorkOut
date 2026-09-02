@@ -55,3 +55,43 @@ export type SkillProgress = {
 
   next_exercise: ForgeExercise | null;
 };
+
+
+/* ============================================================
+   SKILL TREE
+   ============================================================ */
+
+export type SkillNodeStatus =
+  | "complete"
+  | "current"
+  | "locked";
+
+export type SkillNode = {
+  exercise: ForgeExercise;
+
+  status: SkillNodeStatus;
+
+  mastery_percent: number;
+
+  best_reps: number | null;
+  best_sets: number | null;
+  best_hold_seconds: number | null;
+  best_distance: number | null;
+  best_duration_minutes: number | null;
+
+  training_sessions_completed: number;
+
+  training_requirement_met: boolean;
+  final_gate_completed: boolean;
+  unlocked: boolean;
+
+  progression: SkillProgress["progression"];
+
+  next_exercise: ForgeExercise | null;
+};
+
+export type SkillChain = {
+  id: string;
+  category: string;
+  nodes: SkillNode[];
+};
