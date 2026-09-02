@@ -5,6 +5,7 @@ import type {
   SkillProgress,
   SkillChain,
   SkillNode,
+  SkillNodeStatus,
 } from "@/lib/forge/types";
 
 export type ForgeClient = Awaited<ReturnType<typeof createClient>>;
@@ -398,12 +399,15 @@ export async function getSkillTree(
   }
 
   const progressionMap =
-    new Map<string, SkillProgress>();
+  new Map<
+    string,
+    NonNullable<SkillProgress["progression"]>
+  >();
 
   for (const progression of progressions) {
     progressionMap.set(
       progression.current_exercise_id,
-      progression as SkillProgress,
+      progression,
     );
   }
 
@@ -671,6 +675,156 @@ export async function getSkillTree(
   });
 
   return chains;
+}
+
+export async function getFoundationProgress(
+  supabase: ForgeClient,
+  userId: string | null,
+) {
+  if (!userId) {
+    return {
+      completed: 0,
+      total: 0,
+      percent: 0,
+      foundation_completed: false,
+    };
+  }
+
+  /*
+   * Load the active foundation standards.
+   */
+  const { data: standards, error: standardsError } =
+    await supabase
+      .from("foundation_standards")
+      .select(`
+        id,
+        test_order,
+        name,
+        exercise_id,
+        requirement_type,
+        required_value,
+        required_reps,
+        required_hold_seconds
+      `)
+      .eq("active", true)
+      .order("test_order", {
+        ascending: true,
+      });
+
+  if (standardsError) {
+    console.error(
+      "getFoundationProgress standards:",
+      standardsError,
+    );
+
+    return {
+      completed: 0,
+      total: 0,
+      percent: 0,
+      foundation_completed: false,
+    };
+  }
+
+  if (!standards || standards.length === 0) {
+    return {
+      completed: 0,
+      total: 0,
+      percent: 0,
+      foundation_completed: false,
+    };
+  }
+
+  /*
+   * Load the user's foundation results.
+   *
+   * We intentionally use the latest result for each
+   * foundation standard.
+   */
+  const { data: tests, error: testsError } =
+    await supabase
+      .from("user_foundation_tests")
+      .select(`
+        id,
+        foundation_standard_id,
+        passed,
+        result_value
+      `)
+      .eq("user_id", userId);
+
+  if (testsError) {
+    console.error(
+      "getFoundationProgress tests:",
+      testsError,
+    );
+
+    return {
+      completed: 0,
+      total: standards.length,
+      percent: 0,
+      foundation_completed: false,
+    };
+  }
+
+  /*
+   * Find the latest test result for each standard.
+   *
+   * user_foundation_tests contains historical attempts,
+   * so the highest id is treated as the latest attempt.
+   */
+  const latestTests = new Map<
+    string,
+    NonNullable<typeof tests>[number]
+  >();
+
+  for (const test of tests ?? []) {
+    const existing =
+      latestTests.get(
+        test.foundation_standard_id,
+      );
+
+    if (
+      !existing ||
+      test.id > existing.id
+    ) {
+      latestTests.set(
+        test.foundation_standard_id,
+        test,
+      );
+    }
+  }
+
+  const completed = standards.filter(
+    (standard) =>
+      latestTests.get(standard.id)?.passed === true,
+  ).length;
+
+  const total = standards.length;
+
+  const percent =
+    total > 0
+      ? Math.round(
+          (completed / total) * 100,
+        )
+      : 0;
+
+  /*
+   * Profile is the authoritative completion flag
+   * once the entire foundation has been completed.
+   */
+  const { data: profile } =
+    await supabase
+      .from("profiles")
+      .select("foundation_completed")
+      .eq("id", userId)
+      .maybeSingle();
+
+  return {
+    completed,
+    total,
+    percent,
+    foundation_completed:
+      profile?.foundation_completed === true,
+  };
 }
 
 export async function getSessionCount(
