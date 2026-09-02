@@ -1,4 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
+import { getLocalDateString } from "@/lib/forge/date";
+import type { SkillProgress } from "@/lib/forge/types";
 
 export type ForgeClient = Awaited<ReturnType<typeof createClient>>;
 
@@ -25,10 +27,28 @@ export async function getProfile(supabase: ForgeClient, userId: string | null) {
 }
 
 export async function getExercises(supabase: ForgeClient) {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("exercises")
-    .select("id, name, category, description, difficulty, equipment, is_skill, xp_value, movement_pattern, muscle_group, instructions")
+    .select(`
+      id,
+      name,
+      category,
+      subcategory,
+      description,
+      instructions,
+      form_cues,
+      difficulty,
+      equipment,
+      is_unilateral,
+      is_foundation_test,
+      foundation_test_name
+    `)
     .order("name");
+
+  if (error) {
+    console.error("getExercises:", error);
+    return [];
+  }
 
   return data ?? [];
 }
@@ -36,15 +56,22 @@ export async function getExercises(supabase: ForgeClient) {
 export async function getSkillProgress(
   supabase: ForgeClient,
   userId: string | null,
-) {
+): Promise<SkillProgress[]> {
   if (!userId) return [];
 
+  /*
+   * Get all unlocked exercise progress for this user.
+   *
+   * We intentionally do not use exercises.is_skill because
+   * that column does not exist in the current database schema.
+   */
   const { data: progress, error: progressError } = await supabase
     .from("exercise_progress")
     .select(`
       exercise_id,
       mastery_percent,
       best_reps,
+      best_sets,
       best_hold_seconds,
       best_distance,
       best_duration_minutes,
@@ -59,6 +86,9 @@ export async function getSkillProgress(
         category,
         subcategory,
         difficulty,
+        description,
+        instructions,
+        form_cues,
         is_foundation_test,
         foundation_test_name
       )
@@ -67,14 +97,11 @@ export async function getSkillProgress(
     .eq("unlocked", true)
     .order("mastery_percent", {
       ascending: false,
+      nullsFirst: false,
     });
 
   if (progressError) {
-    console.error(
-      "getSkillProgress progress query:",
-      JSON.stringify(progressError, null, 2),
-    );
-
+    console.error("getSkillProgress progress:", progressError);
     return [];
   }
 
@@ -83,139 +110,121 @@ export async function getSkillProgress(
   }
 
   /*
-   * Skills are currently identified by exercise category/subcategory.
-   *
-   * We intentionally don't use an `is_skill` column because that
-   * column does not exist in the current exercises table.
+   * Only exercises that participate in an exercise progression
+   * belong in the Skill Tree.
    */
-  const skillProgress = progress.filter((item) => {
-    if (!item.exercises) return false;
-
-    const exercise = Array.isArray(item.exercises)
-      ? item.exercises[0]
-      : item.exercises;
-
-    if (!exercise) return false;
-
-    return (
-      exercise.category === "skill" ||
-      exercise.subcategory === "skill"
-    );
-  });
-
-  if (skillProgress.length === 0) {
-    return [];
-  }
-
-  const exerciseIds = skillProgress.map(
+  const exerciseIds = progress.map(
     (item) => item.exercise_id,
   );
 
-  const {
-    data: progressions,
-    error: progressionError,
-  } = await supabase
-    .from("exercise_progressions")
-    .select(`
-      current_exercise_id,
-      next_exercise_id,
-      required_sets,
-      required_reps,
-      required_hold_seconds,
-      required_distance,
-      required_duration_minutes,
-      required_sessions,
-      final_gate_required,
-      final_gate_type,
-      final_gate_value,
-      final_gate_reps,
-      final_gate_hold_seconds,
-      final_gate_description
-    `)
-    .in("current_exercise_id", exerciseIds);
+  const { data: progressions, error: progressionError } =
+    await supabase
+      .from("exercise_progressions")
+      .select(`
+        current_exercise_id,
+        next_exercise_id,
+        required_sets,
+        required_reps,
+        required_hold_seconds,
+        required_distance,
+        required_duration_minutes,
+        required_sessions,
+        final_gate_required,
+        final_gate_type,
+        final_gate_value,
+        final_gate_reps,
+        final_gate_hold_seconds,
+        final_gate_description
+      `)
+      .in("current_exercise_id", exerciseIds);
 
   if (progressionError) {
     console.error(
-      "getSkillProgress progression query:",
-      JSON.stringify(progressionError, null, 2),
+      "getSkillProgress progressions:",
+      progressionError,
     );
-
-    return skillProgress.map((item) => ({
-      ...item,
-      progression: null,
-      next_exercise: null,
-    }));
+    return [];
   }
 
-  const nextExerciseIds =
-    progressions?.map(
-      (progression) => progression.next_exercise_id,
-    ) ?? [];
+  if (!progressions || progressions.length === 0) {
+    return [];
+  }
 
-  let nextExercises: {
-    id: string;
-    name: string;
-    category: string;
-    subcategory: string | null;
-    difficulty: number | null;
-  }[] = [];
+  /*
+   * Get the exercises that are the next progression.
+   */
+  const nextExerciseIds = [
+    ...new Set(
+      progressions.map(
+        (progression) => progression.next_exercise_id,
+      ),
+    ),
+  ];
 
-  if (nextExerciseIds.length > 0) {
-    const {
-      data,
-      error: nextExerciseError,
-    } = await supabase
+  const { data: nextExercises, error: nextExerciseError } =
+    await supabase
       .from("exercises")
       .select(`
         id,
         name,
         category,
         subcategory,
-        difficulty
+        difficulty,
+        description,
+        instructions,
+        form_cues
       `)
       .in("id", nextExerciseIds);
 
-    if (nextExerciseError) {
-      console.error(
-        "getSkillProgress next exercise query:",
-        JSON.stringify(nextExerciseError, null, 2),
-      );
-    } else {
-      nextExercises = data ?? [];
-    }
+  if (nextExerciseError) {
+    console.error(
+      "getSkillProgress next exercises:",
+      nextExerciseError,
+    );
+    return [];
   }
 
+  /*
+   * Build lookup maps so we don't repeatedly search arrays.
+   */
   const progressionMap = new Map(
-    (progressions ?? []).map((progression) => [
+    progressions.map((progression) => [
       progression.current_exercise_id,
       progression,
     ]),
   );
 
   const nextExerciseMap = new Map(
-    nextExercises.map((exercise) => [
+    (nextExercises ?? []).map((exercise) => [
       exercise.id,
       exercise,
     ]),
   );
 
-  return skillProgress.map((item) => {
-    const progression = progressionMap.get(
-      item.exercise_id,
-    );
+  /*
+   * Only return exercises that actually participate in
+   * a progression chain.
+   */
+  return progress
+    .filter((item) =>
+      progressionMap.has(item.exercise_id),
+    )
+    .map((item) => {
+      const progression =
+        progressionMap.get(item.exercise_id) ?? null;
 
-    const nextExercise = progression
-      ? nextExerciseMap.get(
-          progression.next_exercise_id,
-        ) ?? null
-      : null;
+      const nextExercise = progression
+        ? nextExerciseMap.get(
+            progression.next_exercise_id,
+          ) ?? null
+        : null;
 
-    return {
-      ...item,
-      progression: progression ?? null,
-      next_exercise: nextExercise,
-    };
-  });
+      return {
+        ...item,
+        progression,
+        next_exercise: nextExercise,
+      } as SkillProgress;
+    });
 }
 
 export async function getSessionCount(
@@ -244,7 +253,7 @@ export async function getTodayCheckin(
   if (!userId) return null;
 
   // Use the same local calendar date approach as the check-in component.
-  const today = new Date().toLocaleDateString("en-CA");
+  const today = getLocalDateString();
 
   const { data, error } = await supabase
     .from("daily_checkins")
@@ -346,13 +355,55 @@ export async function getActivityMiles(
 export async function getTodayWorkout(supabase: ForgeClient, userId: string | null) {
   if (!userId) return null;
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = getLocalDateString();
   const { data } = await supabase
     .from("scheduled_workouts")
     .select("id, status, scheduled_date, workout_id, workouts(id, name, description, workout_type, workout_exercises(exercise_order, target_sets, target_reps, target_hold_seconds, target_distance, target_duration_minutes, rest_seconds, notes, exercises(name, category)))")
     .eq("user_id", userId)
     .eq("scheduled_date", today)
     .maybeSingle();
+
+  return data;
+}
+
+export async function getCurrentProgramWeek(
+  supabase: ForgeClient,
+  userId: string | null,
+) {
+  if (!userId) return null;
+
+  const { data, error } = await supabase
+    .from("scheduled_workouts")
+    .select(`
+      scheduled_date,
+      workout_id,
+      workouts (
+        id,
+        name,
+        program_week_id,
+        program_weeks (
+          id,
+          week_number,
+          name,
+          focus,
+          description,
+          program_id,
+          programs (
+            id,
+            name,
+            total_weeks
+          )
+        )
+      )
+    `)
+    .eq("user_id", userId)
+    .eq("scheduled_date", getLocalDateString())
+    .maybeSingle();
+
+  if (error) {
+    console.error("getCurrentProgramWeek:", error);
+    return null;
+  }
 
   return data;
 }
