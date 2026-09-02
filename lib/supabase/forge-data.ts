@@ -65,6 +65,80 @@ export async function getSessionCount(
   return count ?? 0;
 }
 
+export async function getTodayCheckin(
+  supabase: ForgeClient,
+  userId: string | null,
+) {
+  if (!userId) return null;
+
+  // Use the same local calendar date approach as the check-in component.
+  const today = new Date().toLocaleDateString("en-CA");
+
+  const { data, error } = await supabase
+    .from("daily_checkins")
+    .select(
+      "id, checkin_date, energy, soreness, sleep_hours, stress, readiness, notes",
+    )
+    .eq("user_id", userId)
+    .eq("checkin_date", today)
+    .maybeSingle();
+
+  if (error) {
+    console.error("getTodayCheckin:", error);
+    return null;
+  }
+
+  return data;
+}
+
+export function calculateRecoveryScore(checkin: {
+  energy: number | null;
+  soreness: number | null;
+  sleep_hours: number | null;
+  stress: number | null;
+  readiness: number | null;
+} | null) {
+  if (!checkin) return null;
+
+  const {
+    energy,
+    soreness,
+    sleep_hours,
+    stress,
+    readiness,
+  } = checkin;
+
+  // Need enough information to produce a meaningful score.
+  const values: number[] = [];
+
+  if (energy != null) {
+    values.push(energy / 5);
+  }
+
+  if (soreness != null) {
+    values.push((6 - soreness) / 5);
+  }
+
+  if (sleep_hours != null) {
+    // 8 hours = ideal, capped at 100%.
+    values.push(Math.min(sleep_hours / 8, 1));
+  }
+
+  if (stress != null) {
+    values.push((6 - stress) / 5);
+  }
+
+  if (readiness != null) {
+    values.push(readiness / 5);
+  }
+
+  if (values.length === 0) return null;
+
+  return Math.round(
+    (values.reduce((sum, value) => sum + value, 0) / values.length) * 100,
+  );
+}
+
 export async function getUnlockedSkillCount(
   supabase: ForgeClient,
   userId: string | null,
