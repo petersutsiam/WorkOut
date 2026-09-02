@@ -33,17 +33,189 @@ export async function getExercises(supabase: ForgeClient) {
   return data ?? [];
 }
 
-export async function getSkillProgress(supabase: ForgeClient, userId: string | null) {
+export async function getSkillProgress(
+  supabase: ForgeClient,
+  userId: string | null,
+) {
   if (!userId) return [];
 
-  const { data } = await supabase
+  const { data: progress, error: progressError } = await supabase
     .from("exercise_progress")
-    .select("exercise_id, mastery_percent, best_reps, best_hold_seconds, unlocked, exercises(name, category)")
+    .select(`
+      exercise_id,
+      mastery_percent,
+      best_reps,
+      best_hold_seconds,
+      best_distance,
+      best_duration_minutes,
+      training_sessions_completed,
+      training_requirement_met,
+      final_gate_completed,
+      unlocked,
+      last_performed_at,
+      exercises (
+        id,
+        name,
+        category,
+        subcategory,
+        difficulty,
+        is_foundation_test,
+        foundation_test_name
+      )
+    `)
     .eq("user_id", userId)
     .eq("unlocked", true)
-    .order("mastery_percent", { ascending: false });
+    .order("mastery_percent", {
+      ascending: false,
+    });
 
-  return data ?? [];
+  if (progressError) {
+    console.error(
+      "getSkillProgress progress query:",
+      JSON.stringify(progressError, null, 2),
+    );
+
+    return [];
+  }
+
+  if (!progress || progress.length === 0) {
+    return [];
+  }
+
+  /*
+   * Skills are currently identified by exercise category/subcategory.
+   *
+   * We intentionally don't use an `is_skill` column because that
+   * column does not exist in the current exercises table.
+   */
+  const skillProgress = progress.filter((item) => {
+    if (!item.exercises) return false;
+
+    const exercise = Array.isArray(item.exercises)
+      ? item.exercises[0]
+      : item.exercises;
+
+    if (!exercise) return false;
+
+    return (
+      exercise.category === "skill" ||
+      exercise.subcategory === "skill"
+    );
+  });
+
+  if (skillProgress.length === 0) {
+    return [];
+  }
+
+  const exerciseIds = skillProgress.map(
+    (item) => item.exercise_id,
+  );
+
+  const {
+    data: progressions,
+    error: progressionError,
+  } = await supabase
+    .from("exercise_progressions")
+    .select(`
+      current_exercise_id,
+      next_exercise_id,
+      required_sets,
+      required_reps,
+      required_hold_seconds,
+      required_distance,
+      required_duration_minutes,
+      required_sessions,
+      final_gate_required,
+      final_gate_type,
+      final_gate_value,
+      final_gate_reps,
+      final_gate_hold_seconds,
+      final_gate_description
+    `)
+    .in("current_exercise_id", exerciseIds);
+
+  if (progressionError) {
+    console.error(
+      "getSkillProgress progression query:",
+      JSON.stringify(progressionError, null, 2),
+    );
+
+    return skillProgress.map((item) => ({
+      ...item,
+      progression: null,
+      next_exercise: null,
+    }));
+  }
+
+  const nextExerciseIds =
+    progressions?.map(
+      (progression) => progression.next_exercise_id,
+    ) ?? [];
+
+  let nextExercises: {
+    id: string;
+    name: string;
+    category: string;
+    subcategory: string | null;
+    difficulty: number | null;
+  }[] = [];
+
+  if (nextExerciseIds.length > 0) {
+    const {
+      data,
+      error: nextExerciseError,
+    } = await supabase
+      .from("exercises")
+      .select(`
+        id,
+        name,
+        category,
+        subcategory,
+        difficulty
+      `)
+      .in("id", nextExerciseIds);
+
+    if (nextExerciseError) {
+      console.error(
+        "getSkillProgress next exercise query:",
+        JSON.stringify(nextExerciseError, null, 2),
+      );
+    } else {
+      nextExercises = data ?? [];
+    }
+  }
+
+  const progressionMap = new Map(
+    (progressions ?? []).map((progression) => [
+      progression.current_exercise_id,
+      progression,
+    ]),
+  );
+
+  const nextExerciseMap = new Map(
+    nextExercises.map((exercise) => [
+      exercise.id,
+      exercise,
+    ]),
+  );
+
+  return skillProgress.map((item) => {
+    const progression = progressionMap.get(
+      item.exercise_id,
+    );
+
+    const nextExercise = progression
+      ? nextExerciseMap.get(
+          progression.next_exercise_id,
+        ) ?? null
+      : null;
+
+    return {
+      ...item,
+      progression: progression ?? null,
+      next_exercise: nextExercise,
+    };
+  });
 }
 
 export async function getSessionCount(
